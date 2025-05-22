@@ -1,0 +1,17 @@
+{
+  "name": "rfid-consumer",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "dotenv": "^16.5.0",
+    "mqtt": "^5.11.1",
+    "pg": "^8.15.5"
+  }
+}
