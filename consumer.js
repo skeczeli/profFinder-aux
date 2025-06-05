@@ -38,6 +38,10 @@ client.on('message', async (_topic, payload) => {
     }
 
     // 3) insertar movimiento
+	console.log("🧪 ts recibido:", ts);
+	console.log("🕒 Interpretado como milisegundos:", new Date(ts).toISOString());
+	console.log("🕒 Interpretado como segundos:", new Date(ts * 1000).toISOString());
+
     await pool.query(
       `INSERT INTO ingresos (profesor_id, aula_id, evento, fecha)
        VALUES ($1, $2, $3, to_timestamp($4))`,
@@ -60,3 +64,4 @@ client.publish(
     console.error('Error al procesar mensaje:', err.message);
   }
 });
+
