@@ -84,7 +84,8 @@ void conectarWiFi() {
 void conectarMQTT() {
   while (!mqttClient.connected()) {
     Serial.print("Conectando a MQTT… ");
-    if (mqttClient.connect("ESP32-RFID", MQTT_USER, MQTT_PASS)) {
+    String clientId = "ESP32-RFID-" + esp32Id;
+    if (mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
       Serial.println("OK");
       mqttClient.subscribe(topicDisplay.c_str());
     } else {
@@ -125,50 +126,85 @@ void setup() {
 
 // ------------------- LOOP ------------------------------
 void loop() {
-  if (!mqttClient.connected()) conectarMQTT();
+  if (!mqttClient.connected()) {
+    Serial.println("[MQTT] Desconectado. Reintentando conexión...");
+    conectarMQTT();
+  }
   mqttClient.loop();
 
-  // ¿Tarjeta presente?
-  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    String uid = "";
-    for (byte i = 0; i < rfid.uid.size; i++) {
-      uid += (rfid.uid.uidByte[i] < 0x10 ? "0" : "");
-      uid += String(rfid.uid.uidByte[i], HEX);
+  // --- LECTURA DE TARJETA ---
+  if (rfid.PICC_IsNewCardPresent()) {
+    Serial.println("[RFID] Tarjeta detectada.");
+    if (rfid.PICC_ReadCardSerial()) {
+      Serial.println("[RFID] UID leído correctamente.");
+      String uid = "";
+      for (byte i = 0; i < rfid.uid.size; i++) {
+        uid += (rfid.uid.uidByte[i] < 0x10 ? "0" : "");
+        uid += String(rfid.uid.uidByte[i], HEX);
+      }
+      uid.toUpperCase();
+      Serial.println("[RFID] UID: " + uid);
+
+      const char* tipo;
+      if (estaDentro(uid)) {
+        quitarTarjeta(uid);
+        tipo = "salida";
+        Serial.println("[LÓGICA] Ya estaba dentro → será salida");
+      } else {
+        agregarTarjeta(uid);
+        tipo = "entrada";
+        Serial.println("[LÓGICA] No estaba dentro → será entrada");
+      }
+
+      time_t ts = time(nullptr) - 3 * 3600;
+      Serial.print("[TIEMPO] Timestamp: ");
+      Serial.println((uint32_t)ts);
+
+      StaticJsonDocument<128> doc;
+      doc["uid"]   = uid;
+      doc["tipo"]  = tipo;
+      doc["ts"]    = (uint32_t)ts;
+      doc["esp32"] = esp32Id;
+
+      char payload[128];
+      serializeJson(doc, payload);
+      Serial.print("[MQTT] Payload: ");
+      Serial.println(payload);
+
+      // Publicar
+      bool success = mqttClient.publish(MQTT_TOPIC, payload);
+      Serial.println(success ? "✅ Publicación exitosa" : "❌ Falló publicación MQTT");
+
+      // Asegurar que el mensaje salga realmente
+      for (int i = 0; i < 10; i++) {
+        mqttClient.loop();
+        delay(10);
+      }
+
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Ultimo evento:");
+      lcd.setCursor(0, 1);
+      lcd.print(((String(tipo) == "entrada" ? "Entra: " : "Sale: ") + uid).substring(0, 16));
+
+      tarjetaLeida = true;
+      lastUIDTime  = millis();
+
+      rfid.PICC_HaltA();
+      rfid.PCD_StopCrypto1();
+    } else {
+      Serial.println("❌ Error al leer la tarjeta.");
     }
-    uid.toUpperCase();
-
-    const char* tipo;
-    if (estaDentro(uid)) { quitarTarjeta(uid); tipo = "salida"; }
-    else                { agregarTarjeta(uid); tipo = "entrada"; }
-
-    StaticJsonDocument<128> doc;
-    doc["uid"]   = uid;
-    doc["tipo"]  = tipo;
-    doc["ts"]    = (uint32_t)(time(nullptr) - 3 * 3600);
-    doc["esp32"] = esp32Id;
-    char payload[128];
-    serializeJson(doc, payload);
-
-    mqttClient.publish(MQTT_TOPIC, payload);
-
-    // Mostrar último evento
-    String pref = (String(tipo) == "entrada") ? "Entra: " : "Sale: ";
-    lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("Ultimo evento:");
-    lcd.setCursor(0, 1); lcd.print((pref + uid).substring(0, 16));
-
-    tarjetaLeida = true;
-    lastUIDTime  = millis();
-
-    rfid.PICC_HaltA();
-    rfid.PCD_StopCrypto1();
   }
 
-  // Después de mostrar entrada/salida, esperar 5s y volver a mostrar consultas
+  // --- ESPERA Y RESTAURACIÓN DE CONSULTAS ---
   if (tarjetaLeida && millis() - lastUIDTime > 5000) {
+    Serial.println("[LCD] Pasaron 5s desde última tarjeta.");
     tarjetaLeida = false;
 
     if (mostrarConsultas && !consultas.empty()) {
+      Serial.println("[LCD] Mostrando consultas nuevamente.");
       indiceConsulta = 0;
       lastConsultaScroll = millis();
 
@@ -181,26 +217,28 @@ void loop() {
       lcd.setCursor(0, 1);
       lcd.print(linea.substring(0, 16));
     } else {
+      Serial.println("[LCD] No hay consultas para mostrar.");
       lcd.clear();
       lcd.print("Escanea tarjeta");
     }
   }
 
-  // Si ya no queda ningún profesor dentro, limpiar consultas
+  // --- LIMPIAR CONSULTAS SI TODOS SE FUERON ---
   if (tarjetasDentro.empty() && !consultas.empty()) {
-    Serial.println("Todos los profesores salieron. Limpiando consultas.");
+    Serial.println("⚠️ No queda nadie adentro. Limpiando consultas.");
     consultas.clear();
     mostrarConsultas = false;
     lcd.clear();
     lcd.print("Escanea tarjeta");
   }
 
-  // Desfile automático de consultas (solo si no estamos mostrando entrada/salida)
+  // --- SCROLL AUTOMÁTICO DE CONSULTAS ---
   if (!tarjetaLeida && mostrarConsultas && consultas.size() > 0 &&
       millis() - lastConsultaScroll > intervaloScroll) {
     indiceConsulta = (indiceConsulta + 1) % consultas.size();
     lastConsultaScroll = millis();
 
+    Serial.println("[SCROLL] Mostrando consulta " + String(indiceConsulta + 1));
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Consultas: ");
@@ -211,7 +249,10 @@ void loop() {
     lcd.print(linea.substring(0, 16));
   }
 
-  // Watchdog RFID
-  if (millis() - lastUIDTime > 2000 && !tarjetaLeida) rfid.PCD_Init();
+  // --- WATCHDOG RFID ---
+  if (millis() - lastUIDTime > 2000 && !tarjetaLeida) {
+    Serial.println("[RFID] Reiniciando lector por watchdog.");
+    rfid.PCD_Init();
+  }
 }
 
